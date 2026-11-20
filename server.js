@@ -12,15 +12,18 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const db = mysql.createConnection({
+const pool = mysql.createPool({
     host: process.env.DB_HOST,
-    port: 4000,
+    port: Number(process.env.DB_PORT || 4000),
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     ssl: {
         minVersion: 'TLSv1.2'
-    }
+    },
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
 });
 
 // Excel upload: memory-ல process செய்கிறது
@@ -874,30 +877,18 @@ app.use("/api", (req, res) => {
 });
 
 async function startServer() {
-  try {
-    console.log("Connecting to database...");
+    try {
+        console.log("Connecting to database...");
 
-    await pool.query("SELECT 1");
+        const connection = await pool.getConnection();
+        console.log("Database connected successfully!");
 
-    console.log("Database connected successfully.");
+        connection.release();
 
-    console.log("Creating database tables...");
+        // Existing server startup code here
 
-    await ensureTables();
-
-    console.log("Database tables ready.");
-
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-
-  } catch (error) {
-    console.error("STARTUP ERROR:", error);
-    console.error("Error code:", error.code);
-    console.error("Error message:", error.message);
-
-    process.exit(1);
-  }
+    } catch (error) {
+        console.error("STARTUP ERROR:", error);
+        process.exit(1);
+    }
 }
-
-startServer();
