@@ -13,14 +13,16 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "chit_member_management",
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  dateStrings: true
+  dateStrings: true,
+  connectTimeout: 15000
 });
 
 // Excel upload: memory-ல process செய்கிறது
@@ -875,15 +877,27 @@ app.use("/api", (req, res) => {
 
 async function startServer() {
   try {
-    await ensureTables();
+    console.log("Connecting to database...");
+
     await pool.query("SELECT 1");
 
+    console.log("Database connected successfully.");
+
+    console.log("Creating database tables...");
+
+    await ensureTables();
+
+    console.log("Database tables ready.");
+
     app.listen(PORT, "0.0.0.0", () => {
-      console.log(`✅ Server running at http://localhost:${PORT}`);
-      console.log("✅ Database connected and tables are ready.");
+      console.log(`Server running on port ${PORT}`);
     });
+
   } catch (error) {
-    console.error("❌ Startup error:", error.sqlMessage || error.message);
+    console.error("STARTUP ERROR:", error);
+    console.error("Error code:", error.code);
+    console.error("Error message:", error.message);
+
     process.exit(1);
   }
 }
