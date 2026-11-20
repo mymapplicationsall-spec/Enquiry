@@ -1,0 +1,22 @@
+{
+  "name": "chit-member-management",
+  "version": "1.0.0",
+  "description": "Chit Member Management System using Node.js, Express and MySQL",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.22.3",
+    "multer": "^2.4.0",
+    "mysql2": "^3.24.5",
+    "sqlite3": "^6.0.1",
+    "xlsx": "^0.18.5"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
