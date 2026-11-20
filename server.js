@@ -21,8 +21,7 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  dateStrings: true,
-  connectTimeout: 15000
+  dateStrings: true
 });
 
 // Excel upload: memory-ல process செய்கிறது
