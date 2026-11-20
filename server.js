@@ -1,4 +1,6 @@
 // server.js
+"use strict";
+
 const express = require("express");
 const mysql = require("mysql2/promise");
 const path = require("path");
@@ -6,27 +8,28 @@ const multer = require("multer");
 const XLSX = require("xlsx");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
+app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// Serve frontend files from /public
 app.use(express.static(path.join(__dirname, "public")));
 
 const pool = mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: {
-        minVersion: 'TLSv1.2'
-    },
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT) || 3306,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  dateStrings: true
 });
 
-// Excel upload: memory-ல process செய்கிறது
+// Excel/CSV upload — file is processed in memory.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }
@@ -37,6 +40,10 @@ const clean = value =>
 
 function validId(value) {
   return /^\d+$/.test(String(value || ""));
+}
+
+function getErrorMessage(error) {
+  return error.sqlMessage || error.message || "Unexpected server error.";
 }
 
 function memberResponse(row) {
@@ -82,7 +89,7 @@ function dueResponse(row) {
   };
 }
 
-function validateMember(body) {
+function validateMember(body = {}) {
   const member = {
     name: clean(body.name),
     address: clean(body.address),
@@ -105,7 +112,7 @@ function validateMember(body) {
   return { member };
 }
 
-function validateEnquiry(body) {
+function validateEnquiry(body = {}) {
   const enquiry = {
     name: clean(body.name),
     mobile: clean(body.mobile),
@@ -129,7 +136,7 @@ function validateEnquiry(body) {
   return { enquiry };
 }
 
-function validateDue(body) {
+function validateDue(body = {}) {
   const due = {
     name: clean(body.name),
     mobileNumber: clean(body.mobileNumber),
@@ -208,17 +215,14 @@ async function ensureTables() {
   `);
 }
 
-// Health
+// Health check
 app.get("/api/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
     res.json({ success: true, message: "Server and database connected." });
   } catch (error) {
     console.error("Health check:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -228,9 +232,11 @@ app.get("/api/dashboard", async (req, res) => {
     const [[members]] = await pool.query(
       "SELECT COUNT(*) AS total FROM members"
     );
+
     const [[enquiries]] = await pool.query(
       "SELECT COUNT(*) AS total FROM enquiries"
     );
+
     const [[dues]] = await pool.query(`
       SELECT COUNT(*) AS total, COALESCE(SUM(due_amount), 0) AS amount
       FROM due_list
@@ -244,10 +250,7 @@ app.get("/api/dashboard", async (req, res) => {
     });
   } catch (error) {
     console.error("Dashboard:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -260,7 +263,7 @@ app.get("/api/members", async (req, res) => {
     const params = [];
 
     if (search) {
-      sql += ` WHERE name LIKE ? OR mobile LIKE ? OR reference LIKE ?`;
+      sql += " WHERE name LIKE ? OR mobile LIKE ? OR reference LIKE ?";
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
 
@@ -270,10 +273,7 @@ app.get("/api/members", async (req, res) => {
     res.json(rows.map(memberResponse));
   } catch (error) {
     console.error("List members:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -284,27 +284,40 @@ app.post("/api/members", async (req, res) => {
   }
 
   const m = result.member;
+  let connection;
 
   try {
-    const [insert] = await pool.execute(
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [insert] = await connection.execute(
       `INSERT INTO members
         (name, address, dob, mobile, email, father_spouse_name, reference,
          occupation, nominee_name, nominee_mobile, nominee_dob, nominee_relationship)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        m.name, m.address || null, m.dob, m.mobile, m.email || null,
-        m.fatherSpouseName || null, m.reference || null, m.occupation || null,
-        m.nomineeName || null, m.nomineeMobile || null, m.nomineeDob,
+        m.name,
+        m.address || null,
+        m.dob,
+        m.mobile,
+        m.email || null,
+        m.fatherSpouseName || null,
+        m.reference || null,
+        m.occupation || null,
+        m.nomineeName || null,
+        m.nomineeMobile || null,
+        m.nomineeDob,
         m.nomineeRelationship || null
       ]
     );
 
-    // Add entry to member_db, used by enquiry mobile lookup
-    await pool.execute(
+    await connection.execute(
       `INSERT INTO member_db (name, reference, joining_date, mobile_number)
        VALUES (?, ?, CURDATE(), ?)`,
       [m.name, m.reference || null, m.mobile]
     );
+
+    await connection.commit();
 
     res.status(201).json({
       success: true,
@@ -312,18 +325,24 @@ app.post("/api/members", async (req, res) => {
       message: "Member added successfully."
     });
   } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
     console.error("Add member:", error);
     res.status(500).json({
       success: false,
       message: "Could not add member.",
-      error: error.sqlMessage || error.message
+      error: getErrorMessage(error)
     });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
 app.get("/api/members/:id", async (req, res) => {
   if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid member ID." });
+    return res.status(400).json({
+      success: false,
+      message: "Invalid member ID."
+    });
   }
 
   try {
@@ -333,22 +352,25 @@ app.get("/api/members/:id", async (req, res) => {
     );
 
     if (!rows.length) {
-      return res.status(404).json({ success: false, message: "Member not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Member not found."
+      });
     }
 
     res.json(memberResponse(rows[0]));
   } catch (error) {
     console.error("Get member:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
 app.put("/api/members/:id", async (req, res) => {
   if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid member ID." });
+    return res.status(400).json({
+      success: false,
+      message: "Invalid member ID."
+    });
   }
 
   const result = validateMember(req.body);
@@ -367,30 +389,42 @@ app.put("/api/members/:id", async (req, res) => {
         nominee_relationship = ?
        WHERE id = ?`,
       [
-        m.name, m.address || null, m.dob, m.mobile, m.email || null,
-        m.fatherSpouseName || null, m.reference || null, m.occupation || null,
-        m.nomineeName || null, m.nomineeMobile || null, m.nomineeDob,
-        m.nomineeRelationship || null, req.params.id
+        m.name,
+        m.address || null,
+        m.dob,
+        m.mobile,
+        m.email || null,
+        m.fatherSpouseName || null,
+        m.reference || null,
+        m.occupation || null,
+        m.nomineeName || null,
+        m.nomineeMobile || null,
+        m.nomineeDob,
+        m.nomineeRelationship || null,
+        req.params.id
       ]
     );
 
     if (!update.affectedRows) {
-      return res.status(404).json({ success: false, message: "Member not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Member not found."
+      });
     }
 
     res.json({ success: true, message: "Member updated successfully." });
   } catch (error) {
     console.error("Update member:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
 app.delete("/api/members/:id", async (req, res) => {
   if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid member ID." });
+    return res.status(400).json({
+      success: false,
+      message: "Invalid member ID."
+    });
   }
 
   try {
@@ -400,16 +434,16 @@ app.delete("/api/members/:id", async (req, res) => {
     );
 
     if (!result.affectedRows) {
-      return res.status(404).json({ success: false, message: "Member not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Member not found."
+      });
     }
 
     res.json({ success: true, message: "Member deleted." });
   } catch (error) {
     console.error("Delete member:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -433,19 +467,18 @@ app.get("/api/member-db", async (req, res) => {
 
     const [rows] = await pool.execute(sql, params);
 
-    res.json(rows.map(row => ({
-      id: Number(row.id),
-      name: row.name || "",
-      reference: row.reference || "",
-      joiningDate: row.joining_date || "",
-      mobile: row.mobile_number || ""
-    })));
+    res.json(
+      rows.map(row => ({
+        id: Number(row.id),
+        name: row.name || "",
+        reference: row.reference || "",
+        joiningDate: row.joining_date || "",
+        mobile: row.mobile_number || ""
+      }))
+    );
   } catch (error) {
     console.error("Member DB:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -468,10 +501,7 @@ app.get("/api/enquiries", async (req, res) => {
     res.json(rows.map(enquiryResponse));
   } catch (error) {
     console.error("List enquiries:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -494,7 +524,6 @@ app.post("/api/enquiries", async (req, res) => {
       [e.name, e.mobile, e.reference || null, e.planMonth, e.planValue]
     );
 
-    // Keep the enquiry in member_db for the enquiry mobile lookup.
     await connection.execute(
       `INSERT INTO member_db (name, reference, joining_date, mobile_number)
        VALUES (?, ?, CURDATE(), ?)`,
@@ -514,7 +543,7 @@ app.post("/api/enquiries", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Could not save enquiry.",
-      error: error.sqlMessage || error.message
+      error: getErrorMessage(error)
     });
   } finally {
     if (connection) connection.release();
@@ -523,7 +552,10 @@ app.post("/api/enquiries", async (req, res) => {
 
 app.get("/api/enquiries/:id", async (req, res) => {
   if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid enquiry ID." });
+    return res.status(400).json({
+      success: false,
+      message: "Invalid enquiry ID."
+    });
   }
 
   try {
@@ -533,22 +565,25 @@ app.get("/api/enquiries/:id", async (req, res) => {
     );
 
     if (!rows.length) {
-      return res.status(404).json({ success: false, message: "Enquiry not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Enquiry not found."
+      });
     }
 
     res.json(enquiryResponse(rows[0]));
   } catch (error) {
     console.error("Get enquiry:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
 app.put("/api/enquiries/:id", async (req, res) => {
   if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid enquiry ID." });
+    return res.status(400).json({
+      success: false,
+      message: "Invalid enquiry ID."
+    });
   }
 
   const result = validateEnquiry(req.body);
@@ -564,28 +599,35 @@ app.put("/api/enquiries/:id", async (req, res) => {
        SET name = ?, mobile = ?, reference = ?, plan_month = ?, plan_value = ?
        WHERE id = ?`,
       [
-        e.name, e.mobile, e.reference || null,
-        e.planMonth, e.planValue, req.params.id
+        e.name,
+        e.mobile,
+        e.reference || null,
+        e.planMonth,
+        e.planValue,
+        req.params.id
       ]
     );
 
     if (!update.affectedRows) {
-      return res.status(404).json({ success: false, message: "Enquiry not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Enquiry not found."
+      });
     }
 
     res.json({ success: true, message: "Enquiry updated." });
   } catch (error) {
     console.error("Update enquiry:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
 app.delete("/api/enquiries/:id", async (req, res) => {
   if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid enquiry ID." });
+    return res.status(400).json({
+      success: false,
+      message: "Invalid enquiry ID."
+    });
   }
 
   try {
@@ -595,16 +637,16 @@ app.delete("/api/enquiries/:id", async (req, res) => {
     );
 
     if (!result.affectedRows) {
-      return res.status(404).json({ success: false, message: "Enquiry not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Enquiry not found."
+      });
     }
 
     res.json({ success: true, message: "Enquiry deleted." });
   } catch (error) {
     console.error("Delete enquiry:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -620,8 +662,11 @@ app.get("/api/due-list", async (req, res) => {
       sql += ` WHERE name LIKE ? OR mobile_number LIKE ?
                OR reference LIKE ? OR follow_by LIKE ? OR comments LIKE ?`;
       params.push(
-        `%${search}%`, `%${search}%`, `%${search}%`,
-        `%${search}%`, `%${search}%`
+        `%${search}%`,
+        `%${search}%`,
+        `%${search}%`,
+        `%${search}%`,
+        `%${search}%`
       );
     }
 
@@ -631,10 +676,7 @@ app.get("/api/due-list", async (req, res) => {
     res.json({ rows: rows.map(dueResponse) });
   } catch (error) {
     console.error("List due records:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -652,8 +694,13 @@ app.post("/api/due-list", async (req, res) => {
         (name, mobile_number, reference, due_amount, follow_by, due_date, comments)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
-        d.name, d.mobileNumber || null, d.reference || null,
-        d.dueAmount, d.followBy || null, d.dueDate, d.comments || null
+        d.name,
+        d.mobileNumber || null,
+        d.reference || null,
+        d.dueAmount,
+        d.followBy || null,
+        d.dueDate,
+        d.comments || null
       ]
     );
 
@@ -664,129 +711,46 @@ app.post("/api/due-list", async (req, res) => {
     });
   } catch (error) {
     console.error("Add due:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
-app.get("/api/due-list/:id", async (req, res) => {
-  if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid due ID." });
-  }
-
-  try {
-    const [rows] = await pool.execute(
-      "SELECT * FROM due_list WHERE id = ?",
-      [req.params.id]
-    );
-
-    if (!rows.length) {
-      return res.status(404).json({ success: false, message: "Due record not found." });
-    }
-
-    res.json(dueResponse(rows[0]));
-  } catch (error) {
-    console.error("Get due:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
-  }
-});
-
-app.put("/api/due-list/:id", async (req, res) => {
-  if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid due ID." });
-  }
-
-  const result = validateDue(req.body);
-  if (result.error) {
-    return res.status(400).json({ success: false, message: result.error });
-  }
-
-  const d = result.due;
-
-  try {
-    const [update] = await pool.execute(
-      `UPDATE due_list SET
-        name = ?, mobile_number = ?, reference = ?, due_amount = ?,
-        follow_by = ?, due_date = ?, comments = ?
-       WHERE id = ?`,
-      [
-        d.name, d.mobileNumber || null, d.reference || null, d.dueAmount,
-        d.followBy || null, d.dueDate, d.comments || null, req.params.id
-      ]
-    );
-
-    if (!update.affectedRows) {
-      return res.status(404).json({ success: false, message: "Due record not found." });
-    }
-
-    res.json({ success: true, message: "Due record updated." });
-  } catch (error) {
-    console.error("Update due:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
-  }
-});
-
-app.delete("/api/due-list/:id", async (req, res) => {
-  if (!validId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid due ID." });
-  }
-
-  try {
-    const [result] = await pool.execute(
-      "DELETE FROM due_list WHERE id = ?",
-      [req.params.id]
-    );
-
-    if (!result.affectedRows) {
-      return res.status(404).json({ success: false, message: "Due record not found." });
-    }
-
-    res.json({ success: true, message: "Due record deleted." });
-  } catch (error) {
-    console.error("Delete due:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
-  }
-});
-
+// Keep this route before /api/due-list/:id.
 app.delete("/api/due-list/clear", async (req, res) => {
   try {
     await pool.query("DELETE FROM due_list");
     res.json({ success: true, message: "Due List cleared." });
   } catch (error) {
     console.error("Clear due list:", error);
-    res.status(500).json({
-      success: false,
-      error: error.sqlMessage || error.message
-    });
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
-// Excel/CSV import. Expected headers include:
-// Name, Mobile Number, Reference, Due Amount, Follow By, Due Date, Comments
+// Excel/CSV import. Headers: Name, Mobile Number, Reference, Due Amount,
+// Follow By, Due Date, Comments.
 app.post("/api/due-list/upload", upload.single("file"), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ success: false, message: "Please select a file." });
+    return res.status(400).json({
+      success: false,
+      message: "Please select a file."
+    });
   }
 
   let connection;
 
   try {
-    const workbook = XLSX.read(req.file.buffer, { type: "buffer", cellDates: false });
+    const workbook = XLSX.read(req.file.buffer, {
+      type: "buffer",
+      cellDates: false
+    });
+
     const firstSheet = workbook.SheetNames[0];
 
     if (!firstSheet) {
-      return res.status(400).json({ success: false, message: "Excel sheet is empty." });
+      return res.status(400).json({
+        success: false,
+        message: "Excel sheet is empty."
+      });
     }
 
     const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], {
@@ -803,7 +767,8 @@ app.post("/api/due-list/upload", upload.single("file"), async (req, res) => {
       const normalized = {};
 
       for (const [key, value] of Object.entries(row)) {
-        normalized[String(key).trim().toLowerCase().replace(/[_\s-]+/g, "")] = value;
+        normalized[String(key).trim().toLowerCase().replace(/[_\s-]+/g, "")] =
+          value;
       }
 
       const name = clean(normalized.name);
@@ -811,21 +776,27 @@ app.post("/api/due-list/upload", upload.single("file"), async (req, res) => {
         normalized.mobilenumber || normalized.mobile || normalized.phone
       );
       const reference = clean(normalized.reference);
-      const amount = Number(
-        normalized.dueamount ?? normalized.amount ?? normalized.due
-      );
+
+      const rawAmount =
+        normalized.dueamount ?? normalized.amount ?? normalized.due;
+      const amount = Number(rawAmount);
+
       const followBy = clean(normalized.followby);
       const comments = clean(normalized.comments);
 
       let dueDate = clean(normalized.duedate || normalized.followdate);
+
       if (/^\d+(\.\d+)?$/.test(dueDate)) {
         const parsed = XLSX.SSF.parse_date_code(Number(dueDate));
+
         if (parsed) {
-          dueDate = `${parsed.y}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
+          dueDate = `${parsed.y}-${String(parsed.m).padStart(2, "0")}-${String(
+            parsed.d
+          ).padStart(2, "0")}`;
         }
       }
 
-      if (!name || !Number.isFinite(amount) || amount < 0) {
+      if (!name || rawAmount === "" || !Number.isFinite(amount) || amount < 0) {
         skippedRows++;
         continue;
       }
@@ -839,8 +810,13 @@ app.post("/api/due-list/upload", upload.single("file"), async (req, res) => {
           (name, mobile_number, reference, due_amount, follow_by, due_date, comments)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
-          name, mobileNumber || null, reference || null, amount,
-          followBy || null, dueDate || null, comments || null
+          name,
+          mobileNumber || null,
+          reference || null,
+          amount,
+          followBy || null,
+          dueDate || null,
+          comments || null
         ]
       );
 
@@ -861,10 +837,113 @@ app.post("/api/due-list/upload", upload.single("file"), async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Excel upload failed.",
-      error: error.sqlMessage || error.message
+      error: getErrorMessage(error)
     });
   } finally {
     if (connection) connection.release();
+  }
+});
+
+app.get("/api/due-list/:id", async (req, res) => {
+  if (!validId(req.params.id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid due ID."
+    });
+  }
+
+  try {
+    const [rows] = await pool.execute(
+      "SELECT * FROM due_list WHERE id = ?",
+      [req.params.id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Due record not found."
+      });
+    }
+
+    res.json(dueResponse(rows[0]));
+  } catch (error) {
+    console.error("Get due:", error);
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
+  }
+});
+
+app.put("/api/due-list/:id", async (req, res) => {
+  if (!validId(req.params.id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid due ID."
+    });
+  }
+
+  const result = validateDue(req.body);
+  if (result.error) {
+    return res.status(400).json({ success: false, message: result.error });
+  }
+
+  const d = result.due;
+
+  try {
+    const [update] = await pool.execute(
+      `UPDATE due_list SET
+        name = ?, mobile_number = ?, reference = ?, due_amount = ?,
+        follow_by = ?, due_date = ?, comments = ?
+       WHERE id = ?`,
+      [
+        d.name,
+        d.mobileNumber || null,
+        d.reference || null,
+        d.dueAmount,
+        d.followBy || null,
+        d.dueDate,
+        d.comments || null,
+        req.params.id
+      ]
+    );
+
+    if (!update.affectedRows) {
+      return res.status(404).json({
+        success: false,
+        message: "Due record not found."
+      });
+    }
+
+    res.json({ success: true, message: "Due record updated." });
+  } catch (error) {
+    console.error("Update due:", error);
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
+  }
+});
+
+app.delete("/api/due-list/:id", async (req, res) => {
+  if (!validId(req.params.id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid due ID."
+    });
+  }
+
+  try {
+    const [result] = await pool.execute(
+      "DELETE FROM due_list WHERE id = ?",
+      [req.params.id]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({
+        success: false,
+        message: "Due record not found."
+      });
+    }
+
+    res.json({ success: true, message: "Due record deleted." });
+  } catch (error) {
+    console.error("Delete due:", error);
+    res.status(500).json({ success: false, error: getErrorMessage(error) });
   }
 });
 
@@ -876,19 +955,49 @@ app.use("/api", (req, res) => {
   });
 });
 
+// Handle JSON parsing errors and other Express errors.
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    return res.status(400).json({
+      success: false,
+      message:
+        error.code === "LIMIT_FILE_SIZE"
+          ? "File size must be 10MB or less."
+          : error.message
+    });
+  }
+
+  if (error instanceof SyntaxError && error.status === 400 && "body" in error) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid JSON request body."
+    });
+  }
+
+  console.error("Unhandled error:", error);
+  res.status(500).json({
+    success: false,
+    message: "Internal server error."
+  });
+});
+
 async function startServer() {
-    try {
-        console.log("Connecting to database...");
+  try {
+    console.log("Connecting to database...");
+    await pool.query("SELECT 1");
+    console.log("Database connected successfully.");
 
-        const connection = await pool.getConnection();
-        console.log("Database connected successfully!");
+    console.log("Creating database tables...");
+    await ensureTables();
+    console.log("Database tables ready.");
 
-        connection.release();
-
-        // Existing server startup code here
-
-    } catch (error) {
-        console.error("STARTUP ERROR:", error);
-        process.exit(1);
-    }
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error("STARTUP ERROR:", error);
+    process.exit(1);
+  }
 }
+
+startServer();
